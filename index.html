@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="PaveWatch"/>
+<meta name="theme-color" content="#060810"/>
+<title>PaveWatch</title>
+
+<!-- ═══════════════════════════════════════════
+     ⚙️  CONFIGURATION — FILL THESE IN
+     ═══════════════════════════════════════════
+     1. Get a Google Maps JS API key:
+        console.cloud.google.com → Maps JavaScript API
+        Enable: Maps JS API + Places API
+        Add your domain to allowed referrers
+
+     2. Create a Firebase project:
+        console.firebase.google.com → Add project
+        Add a Web app → copy the config below
+        Firestore → Create database (start in test mode)
+-->
+<script>
+  const CONFIG = {
+    // ── Google Maps ──────────────────────────────
+    GOOGLE_MAPS_KEY: "AIzaSyClbh-srJuHXtxt2ZF7dDt7p3ttUicLJlg",
+
+    // ── Firebase ─────────────────────────────────
+    FIREBASE: {
+     	apiKey: "AIzaSyAm8pU3rVZ_2yIk11172dQ1x8Hp0QNjefI",
+  	authDomain: "pavewatch-8c79c.firebaseapp.com",
+  	projectId: "pavewatch-8c79c",
+  	storageBucket: "pavewatch-8c79c.firebasestorage.app",
+  	messagingSenderId: "609145096029",
+  	appId: "1:609145096029:web:313f29ae2e1f27628b4ab4"
+    },
+
+    // ── Detection tuning ─────────────────────────
+    // Minimum G-force to register as a pothole hit
+    HIT_THRESHOLD_G:    1.3,
+    // Seconds between hits (debounce — avoids multi-counting one hole)
+    HIT_DEBOUNCE_SEC:   1.2,
+    // Merge radius: hits within this many metres share a pothole record
+    MERGE_RADIUS_M:     25,
+    // Distance at which voice warning fires (metres)
+    WARN_DISTANCE_M:    300,
+    // Distance at which urgent warning fires (metres)
+    URGENT_DISTANCE_M:  80,
+  };
+</script>
+
+<style>
+/* ── RESET ── */
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;overflow:hidden;background:#060810;font-family:'DM Sans',system-ui,sans-serif;}
+:root{
+  --bg:#060810;--sur:#0c1020;--s2:#111827;--s3:#1a2235;
+  --bdr:#1e2d45;--bdr2:#2a3f5f;
+  --txt:#e8edf5;--muted:#5a6a85;--muted2:#8899b4;
+  --accent:#3b7eff;--green:#22e09a;--amber:#f5a623;
+  --red:#ff4455;--crit:#ff1a3c;
+  --LOW:#22e09a;--MEDIUM:#f5a623;--HIGH:#ff6b35;--CRITICAL:#ff1a3c;
+}
+
+/* ── APP SHELL ── */
+#app{position:fixed;inset:0;display:flex;flex-direction:column;}
+#map{flex:1;position:relative;}
+#gmap{position:absolute;inset:0;}
+
+/* ── TOP BAR ── */
+#topbar{
+  position:relative;z-index:10;
+  background:rgba(6,8,16,.92);border-bottom:1px solid var(--bdr);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  padding:max(env(safe-area-inset-top),10px) 14px 10px;
+  display:flex;align-items:center;gap:10px;
+}
+.logo{font-family:'Syne',system-ui,sans-serif;font-size:19px;font-weight:800;
+  letter-spacing:-.02em;color:var(--txt);flex-shrink:0;}
+.logo b{color:var(--accent);}
+#pill{
+  display:flex;align-items:center;gap:5px;margin-left:auto;
+  padding:5px 11px;border-radius:20px;border:1px solid var(--bdr);
+  background:var(--sur);font-size:11px;font-family:'DM Mono',monospace;
+  color:var(--muted);letter-spacing:.06em;transition:all .25s;
+}
+#pill.live{border-color:var(--green);color:var(--green);background:rgba(34,224,154,.08);}
+#pill.hit{border-color:var(--red);color:var(--red);background:rgba(255,68,85,.12);}
+.pdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0;}
+#pill.live .pdot{animation:blink 1.4s infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ── MAP FLOATING WIDGETS ── */
+#speed-chip{
+  position:absolute;top:10px;right:10px;z-index:5;
+  background:rgba(6,8,16,.88);border:1px solid var(--bdr);
+  border-radius:10px;padding:7px 11px;text-align:center;
+  backdrop-filter:blur(10px);pointer-events:none;
+}
+#spd{font-family:'Syne',system-ui,sans-serif;font-size:22px;font-weight:800;
+  color:var(--accent);line-height:1;}
+#spd-u{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);
+  letter-spacing:.1em;display:block;}
+
+/* Pothole ahead floating banner */
+#ahead{
+  position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  z-index:5;display:none;
+  border-radius:12px;padding:10px 18px;
+  align-items:center;gap:10px;
+  backdrop-filter:blur(12px);max-width:calc(100vw - 28px);
+  animation:slideup .3s ease;
+}
+#ahead.show{display:flex;}
+@keyframes slideup{from{opacity:0;transform:translateX(-50%) translateY(10px)}
+  to{opacity:1;transform:translateX(-50%) translateY(0)}}
+#ahead-ico{font-size:20px;flex-shrink:0;}
+#ahead-title{font-family:'Syne',system-ui,sans-serif;font-size:14px;
+  font-weight:800;color:#fff;line-height:1.2;}
+#ahead-sub{font-family:'DM Mono',monospace;font-size:10px;
+  color:rgba(255,255,255,.8);margin-top:2px;}
+
+/* Impact flash overlay */
+#flash{position:absolute;inset:0;z-index:4;display:none;pointer-events:none;}
+
+/* ── FALSE ALARM CHIP ── */
+#false-alarm-chip{
+  position:absolute;bottom:70px;left:50%;
+  transform:translateX(-50%) translateY(6px);
+  z-index:6;display:flex;align-items:center;gap:8px;
+  background:rgba(12,16,32,.96);border:1px solid var(--bdr2);
+  border-radius:30px;padding:9px 16px;
+  backdrop-filter:blur(12px);pointer-events:all;
+  opacity:0;transition:opacity .22s,transform .22s;
+  white-space:nowrap;
+}
+#false-alarm-chip.show{
+  opacity:1;transform:translateX(-50%) translateY(0);
+}
+#false-alarm-chip .chip-label{
+  font-family:'DM Mono',monospace;font-size:11px;
+  color:var(--muted2);letter-spacing:.04em;
+}
+#false-alarm-chip .chip-timer{
+  font-family:'DM Mono',monospace;font-size:10px;
+  color:var(--muted);min-width:14px;text-align:center;
+}
+.chip-divider{width:1px;height:14px;background:var(--bdr2);flex-shrink:0;}
+.chip-opt{
+  display:flex;align-items:center;gap:5px;
+  padding:5px 11px;border-radius:20px;border:none;
+  font-family:'DM Mono',monospace;font-size:11px;
+  cursor:pointer;transition:all .15s;letter-spacing:.04em;
+  background:transparent;
+}
+.chip-opt.pothole{color:var(--red);border:1px solid rgba(255,68,85,.3);}
+.chip-opt.pothole:hover,.chip-opt.pothole:active{
+  background:rgba(255,68,85,.12);}
+.chip-opt.not-pothole{color:var(--muted2);border:1px solid var(--bdr);}
+.chip-opt.not-pothole:hover,.chip-opt.not-pothole:active{
+  background:var(--s2);color:var(--txt);}
+
+/* mic listening ring on chip */
+#chip-mic{
+  display:none;align-items:center;gap:6px;
+  font-family:'DM Mono',monospace;font-size:10px;color:var(--accent);
+  letter-spacing:.04em;
+}
+#chip-mic.on{display:flex;}
+#chip-mic .mic-dot{
+  width:8px;height:8px;border-radius:50%;
+  background:var(--accent);flex-shrink:0;
+  animation:micpulse 0.9s ease-in-out infinite;
+}
+@keyframes micpulse{
+  0%,100%{transform:scale(1);opacity:1;}
+  50%{transform:scale(1.5);opacity:.5;}
+}
+
+/* ── BOTTOM PANEL ── */
+#bottom{
+  position:relative;z-index:10;
+  background:rgba(6,8,16,.94);border-top:1px solid var(--bdr);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  padding:12px 14px max(env(safe-area-inset-bottom),14px);
+}
+
+/* alert strip */
+#alert{
+  display:none;border-radius:10px;border:1px solid;
+  padding:9px 13px;margin-bottom:10px;
+  align-items:center;gap:10px;
+}
+#alert.on{display:flex;}
+#alert-ico{font-size:18px;flex-shrink:0;}
+#alert-body{flex:1;}
+#alert-title{font-family:'Syne',system-ui,sans-serif;font-size:14px;font-weight:700;}
+#alert-sub{font-family:'DM Mono',monospace;font-size:10px;margin-top:1px;opacity:.8;}
+
+/* G-Force row */
+#grow{display:grid;grid-template-columns:72px 1fr 60px;gap:10px;
+  align-items:center;margin-bottom:10px;}
+#gnum{font-family:'Syne',system-ui,sans-serif;font-size:30px;font-weight:800;
+  color:var(--muted);line-height:1;transition:color .15s;}
+#gnum sub{font-size:12px;font-family:'DM Mono',monospace;font-weight:400;}
+#gtrack{height:8px;background:var(--s2);border-radius:4px;overflow:hidden;}
+#gfill{height:100%;border-radius:4px;width:0%;
+  background:var(--green);transition:width .12s,background .2s;}
+#gsev{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);
+  margin-top:4px;letter-spacing:.08em;}
+#gright{text-align:right;font-family:'DM Mono',monospace;font-size:10px;
+  color:var(--muted);line-height:1.6;}
+#gright strong{color:var(--txt);font-size:13px;}
+
+/* Controls */
+#ctrls{display:flex;gap:8px;}
+#det-btn{
+  flex:1;padding:13px;border-radius:10px;border:none;cursor:pointer;
+  font-family:'Syne',system-ui,sans-serif;font-size:13px;font-weight:800;
+  letter-spacing:.03em;transition:all .2s;
+}
+#det-btn.off{background:var(--s2);border:1px solid var(--bdr2);color:var(--accent);}
+#det-btn.on{background:linear-gradient(135deg,#ff1a3c,#ff4455);color:#fff;border:none;}
+.ic-btn{
+  width:48px;height:48px;border-radius:10px;border:1px solid var(--bdr);
+  background:var(--s2);color:var(--muted2);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;font-size:18px;
+  transition:all .15s;flex-shrink:0;
+}
+.ic-btn.on{border-color:var(--accent);color:var(--accent);
+  background:rgba(59,126,255,.1);}
+.ic-btn.warn{border-color:var(--amber);color:var(--amber);}
+
+/* ── DRAWERS ── */
+.drawer{
+  position:fixed;inset:0;z-index:50;
+  background:rgba(6,8,16,.97);
+  transform:translateY(100%);
+  transition:transform .3s cubic-bezier(.16,1,.3,1);
+  display:flex;flex-direction:column;
+  padding-bottom:env(safe-area-inset-bottom,0);
+}
+.drawer.open{transform:translateY(0);}
+.dhead{
+  padding:14px;border-bottom:1px solid var(--bdr);
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+  padding-top:max(env(safe-area-inset-top),14px);
+}
+.dtitle{font-family:'Syne',system-ui,sans-serif;font-size:18px;font-weight:800;}
+.dclose{background:var(--s2);border:1px solid var(--bdr);color:var(--muted2);
+  border-radius:8px;padding:5px 10px;cursor:pointer;font-size:16px;}
+.dbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+
+/* Log items */
+.log-item{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 14px;border-bottom:1px solid var(--bdr);
+}
+.lsev{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+.lg{font-family:'DM Mono',monospace;font-size:15px;font-weight:500;min-width:50px;}
+.linfo{flex:1;}
+.lstreet{font-size:13px;font-weight:500;}
+.lmeta{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:2px;}
+.lempty{padding:32px 14px;text-align:center;font-family:'DM Mono',monospace;
+  font-size:12px;color:var(--muted);line-height:1.8;}
+
+/* Report drawer */
+.inc-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px;}
+.inc{background:var(--s2);border:1px solid var(--bdr);border-radius:12px;
+  padding:14px;text-align:center;cursor:pointer;transition:all .15s;}
+.inc.sel{border-color:var(--amber);background:rgba(245,166,35,.08);}
+.inc-ico{font-size:26px;margin-bottom:6px;}
+.inc-lbl{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted2);
+  letter-spacing:.06em;}
+.cost-row{display:flex;align-items:center;gap:14px;padding:0 14px 14px;}
+.cost-val{font-family:'Syne',system-ui,sans-serif;font-size:26px;font-weight:800;
+  color:var(--amber);min-width:80px;}
+.sub-btn{
+  margin:0 14px 14px;display:block;width:calc(100% - 28px);
+  padding:14px;border-radius:10px;border:none;
+  background:linear-gradient(135deg,#f5a623,#ff6b35);
+  color:#060810;font-family:'Syne',system-ui,sans-serif;
+  font-size:14px;font-weight:800;cursor:pointer;
+}
+.sub-btn:disabled{opacity:.4;cursor:not-allowed;}
+.note{padding:0 14px 14px;font-family:'DM Mono',monospace;font-size:10px;
+  color:var(--muted);text-align:center;line-height:1.6;}
+
+/* ── SETUP SCREEN ── */
+#setup{
+  position:fixed;inset:0;z-index:200;
+  background:var(--bg);display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:32px 24px;
+  text-align:center;
+}
+#setup h1{font-family:'Syne',system-ui,sans-serif;font-size:26px;font-weight:800;
+  color:var(--txt);margin-bottom:8px;}
+#setup p{font-size:14px;color:var(--muted2);line-height:1.7;margin-bottom:20px;}
+.setup-step{
+  width:100%;background:var(--sur);border:1px solid var(--bdr);
+  border-radius:12px;padding:14px;margin-bottom:10px;text-align:left;
+}
+.setup-step h3{font-family:'DM Mono',monospace;font-size:11px;color:var(--amber);
+  letter-spacing:.1em;margin-bottom:6px;}
+.setup-step p{font-size:12px;color:var(--muted2);line-height:1.6;}
+.setup-step code{background:var(--s2);padding:2px 6px;border-radius:4px;
+  font-size:11px;color:var(--accent);}
+#setup-ok{
+  width:100%;padding:14px;border-radius:10px;border:none;
+  background:var(--accent);color:#fff;
+  font-family:'Syne',system-ui,sans-serif;font-size:14px;font-weight:800;
+  cursor:pointer;margin-top:8px;
+}
+
+/* ── TOAST ── */
+#toast{
+  position:fixed;top:80px;left:50%;
+  transform:translateX(-50%) translateY(-8px);
+  background:var(--s2);border:1px solid var(--bdr);
+  border-radius:10px;padding:9px 16px;
+  font-family:'DM Mono',monospace;font-size:12px;color:var(--txt);
+  opacity:0;transition:all .22s;pointer-events:none;
+  white-space:nowrap;z-index:300;
+}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0);}
+
+/* ── INSTALL HINT ── */
+#install{
+  display:none;background:rgba(59,126,255,.1);
+  border:1px solid rgba(59,126,255,.25);border-radius:10px;
+  padding:10px 12px;margin:10px 14px 0;
+  align-items:center;gap:10px;
+}
+#install.on{display:flex;}
+#install p{flex:1;font-size:11px;color:var(--muted2);line-height:1.5;}
+#install button{padding:7px 13px;border-radius:8px;border:none;
+  background:var(--accent);color:#fff;font-family:'DM Mono',monospace;
+  font-size:11px;cursor:pointer;white-space:nowrap;}
+
+/* ── MAP STYLE TOGGLE ── */
+#map-style{
+  position:absolute;top:10px;left:10px;z-index:5;
+  background:rgba(6,8,16,.88);border:1px solid var(--bdr);
+  border-radius:8px;display:flex;overflow:hidden;
+}
+.ms-btn{padding:7px 12px;border:none;background:transparent;
+  color:var(--muted);cursor:pointer;font-family:'DM Mono',monospace;
+  font-size:10px;letter-spacing:.05em;transition:all .15s;}
+.ms-btn.on{background:var(--accent);color:#fff;}
+</style>
+</head>
+<body>
+
+<!-- SETUP SCREEN (shown when API keys not configured) -->
+<div id="setup">
+  <div style="font-size:48px;margin-bottom:16px;">🛣️</div>
+  <h1>PaveWatch Setup</h1>
+  <p>Two quick steps before your first test drive. Edit the <code>CONFIG</code> block at the top of this file.</p>
+
+  <div class="setup-step">
+    <h3>STEP 1 · GOOGLE MAPS API KEY</h3>
+    <p>Go to <code>console.cloud.google.com</code> → Create project → Enable <strong>Maps JavaScript API</strong> → Create API key → paste into <code>CONFIG.GOOGLE_MAPS_KEY</code>.<br/><br/>
+    Under API restrictions, add your GitHub Pages domain (e.g. <code>yourname.github.io</code>). Free tier covers ~28,000 map loads/month.</p>
+  </div>
+
+  <div class="setup-step">
+    <h3>STEP 2 · FIREBASE PROJECT</h3>
+    <p>Go to <code>console.firebase.google.com</code> → Add project → Add Web app → copy the config object into <code>CONFIG.FIREBASE</code>.<br/><br/>
+    Then: Firestore Database → Create database → Start in <strong>test mode</strong>. All your drive data saves automatically.</p>
+  </div>
+
+  <button id="setup-ok" onclick="dismissSetup()">I've added my keys — Launch PaveWatch</button>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" style="display:none;">
+
+  <!-- TOP BAR -->
+  <div id="topbar">
+    <div class="logo">Pave<b>Watch</b></div>
+    <div id="db-status" style="font-family:'DM Mono',monospace;font-size:9px;
+      color:var(--muted);letter-spacing:.08em;"></div>
+    <div id="pill"><div class="pdot"></div><span id="pill-txt">READY</span></div>
+  </div>
+
+  <!-- MAP -->
+  <div id="map">
+    <div id="gmap"></div>
+
+    <!-- Map style toggle -->
+    <div id="map-style">
+      <button class="ms-btn on" id="ms-road" onclick="setMapType('roadmap',this)">MAP</button>
+      <button class="ms-btn" id="ms-sat" onclick="setMapType('satellite',this)">SAT</button>
+    </div>
+
+    <!-- Speed chip -->
+    <div id="speed-chip">
+      <div id="spd">0</div>
+      <span id="spd-u">km/h</span>
+    </div>
+
+    <!-- Ahead warning -->
+    <div id="ahead">
+      <div id="ahead-ico">⚠️</div>
+      <div>
+        <div id="ahead-title">POTHOLE AHEAD</div>
+        <div id="ahead-sub">200m · Whyte Ave</div>
+      </div>
+    </div>
+
+    <!-- Impact flash -->
+    <div id="flash"></div>
+
+    <!-- False alarm dismissal chip — appears for 8s after every hit -->
+    <div id="false-alarm-chip">
+      <span class="chip-label">What was that?</span>
+      <div class="chip-divider"></div>
+      <button class="chip-opt pothole" onclick="classifyHit('pothole')">🕳️ Pothole</button>
+      <button class="chip-opt not-pothole" onclick="classifyHit('drain')">🔩 Drain cover</button>
+      <button class="chip-opt not-pothole" onclick="classifyHit('bump')">〰️ Speed bump</button>
+      <div class="chip-divider"></div>
+      <div id="chip-mic"><div class="mic-dot"></div>listening…</div>
+      <span class="chip-timer" id="chip-timer">8</span>
+    </div>
+  </div>
+
+  <!-- Install hint -->
+  <div id="install">
+    <p>Add PaveWatch to your home screen for the best experience</p>
+    <button onclick="doInstall()">Install</button>
+  </div>
+
+  <!-- BOTTOM PANEL -->
+  <div id="bottom">
+    <!-- Proximity alert -->
+    <div id="alert">
+      <div id="alert-ico">⚠️</div>
+      <div id="alert-body">
+        <div id="alert-title">Pothole ahead</div>
+        <div id="alert-sub">Loading…</div>
+      </div>
+    </div>
+
+    <!-- G-force row -->
+    <div id="grow">
+      <div>
+        <div id="gnum">0.0<sub>G</sub></div>
+      </div>
+      <div>
+        <div id="gtrack"><div id="gfill"></div></div>
+        <div id="gsev">SMOOTH ROAD</div>
+      </div>
+      <div id="gright">
+        Session<br/><strong id="hitcount">0</strong> hits
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div id="ctrls">
+      <button id="det-btn" class="off" onclick="toggleDetect()">▶  START DETECTION</button>
+      <button class="ic-btn" id="voice-btn" title="Voice alerts" onclick="toggleVoice()">🔇</button>
+      <button class="ic-btn" id="log-btn" title="Session log" onclick="openLog()">📋</button>
+      <button class="ic-btn warn" id="rep-btn" title="Report damage" onclick="openReport()">⚠️</button>
+    </div>
+  </div>
+</div>
+
+<!-- LOG DRAWER -->
+<div class="drawer" id="log-drawer">
+  <div class="dhead" style="padding-top:max(env(safe-area-inset-top),14px);">
+    <div class="dtitle">Session Log</div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span id="log-count" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);"></span>
+      <button class="dclose" onclick="closeLog()">✕</button>
+    </div>
+  </div>
+  <div class="dbody" id="log-body"></div>
+</div>
+
+<!-- REPORT DRAWER -->
+<div class="drawer" id="rep-drawer">
+  <div class="dhead" style="padding-top:max(env(safe-area-inset-top),14px);">
+    <div class="dtitle">Report Damage</div>
+    <button class="dclose" onclick="closeReport()">✕</button>
+  </div>
+  <div class="dbody">
+    <!-- Last impact summary -->
+    <div id="rep-impact" style="padding:14px;background:rgba(255,68,85,.06);
+      border-bottom:1px solid var(--bdr);">
+      <div style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);
+        letter-spacing:.1em;margin-bottom:4px;">LAST RECORDED IMPACT</div>
+      <div id="rep-g" style="font-family:'Syne',system-ui,sans-serif;
+        font-size:22px;font-weight:800;color:var(--txt);">—</div>
+      <div id="rep-loc" style="font-family:'DM Mono',monospace;font-size:10px;
+        color:var(--muted);margin-top:2px;">No impact recorded yet</div>
+    </div>
+
+    <div style="padding:14px 14px 6px;font-family:'DM Mono',monospace;font-size:9px;
+      color:var(--muted);letter-spacing:.1em;">WHAT WAS DAMAGED?</div>
+    <div class="inc-grid">
+      <div class="inc" onclick="pickDamage('tire',this)">
+        <div class="inc-ico">🛞</div><div class="inc-lbl">TIRE / RIM</div>
+      </div>
+      <div class="inc" onclick="pickDamage('suspension',this)">
+        <div class="inc-ico">⚙️</div><div class="inc-lbl">SUSPENSION</div>
+      </div>
+      <div class="inc" onclick="pickDamage('body',this)">
+        <div class="inc-ico">🚗</div><div class="inc-lbl">BODY / BUMPER</div>
+      </div>
+      <div class="inc" onclick="pickDamage('alignment',this)">
+        <div class="inc-ico">🔩</div><div class="inc-lbl">ALIGNMENT</div>
+      </div>
+    </div>
+
+    <div class="cost-row">
+      <div>
+        <div style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);
+          letter-spacing:.1em;margin-bottom:4px;">REPAIR ESTIMATE</div>
+        <div class="cost-val" id="cost-disp">$0</div>
+      </div>
+      <input type="range" id="cost-slider" min="50" max="2500" step="25" value="0"
+        style="flex:1;accent-color:var(--amber);"
+        oninput="document.getElementById('cost-disp').textContent='$'+parseInt(this.value).toLocaleString()"/>
+    </div>
+
+    <button class="sub-btn" id="sub-btn" onclick="submitClaim()" disabled>
+      📄 SUBMIT CLAIM TO CITY
+    </button>
+    <div class="note">
+      GPS coordinates, G-force reading &amp; timestamp are automatically attached.<br/>
+      Your claim gets a reference number for follow-up.
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- ═══════════════════════════════════════════════════════
+     FIREBASE SDK
+═══════════════════════════════════════════════════════ -->
+<script type="module">
+import { initializeApp }          from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection,
+         addDoc, onSnapshot,
+         query, orderBy, limit,
+         serverTimestamp }        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ─── Init (only if keys are configured) ──────────────────────────────────────
+let db = null;
+try {
+  if (!CONFIG.FIREBASE.apiKey.startsWith("YOUR_")) {
+    const app = initializeApp(CONFIG.FIREBASE);
+    db = getFirestore(app);
+    document.getElementById('db-status').textContent = '● FIREBASE';
+    document.getElementById('db-status').style.color = 'var(--green)';
+  }
+} catch(e) {
+  console.warn('Firebase init failed:', e);
+}
+
+// ─── Save a pothole hit to Firestore ────────────────────────────────────────
+window.saveHit = async (hit) => {
+  if (!db) { console.log('No DB — hit logged locally only:', hit); return; }
+  try {
+    await addDoc(collection(db, 'potholes'), {
+      lat:       hit.lat,
+      lng:       hit.lng,
+      gForce:    hit.g,
+      severity:  hit.sev,
+      street:    hit.street,
+      timestamp: serverTimestamp(),
+      sessionId: window._sessionId,
+      speed:     window._speed || 0,
+    });
+  } catch(e) { console.error('Save failed:', e); }
+};
+
+// ─── Save a damage claim to Firestore ───────────────────────────────────────
+window.saveClaim = async (claim) => {
+  if (!db) { console.log('Claim (local):', claim); return null; }
+  try {
+    const ref = await addDoc(collection(db, 'claims'), {
+      ...claim,
+      timestamp: serverTimestamp(),
+      sessionId: window._sessionId,
+    });
+    return ref.id;
+  } catch(e) { console.error('Claim save failed:', e); return null; }
+};
+
+// ─── Classify / correct a hit in Firestore ──────────────────────────────────
+window.classifyFirestore = async (hitId, type) => {
+  if (!db || !hitId) return;
+  try {
+    const { doc, updateDoc } = await import(
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+    await updateDoc(doc(db, 'potholes', hitId), {
+      type,                      // 'drain' | 'bump' | 'railway' | 'pothole'
+      falseAlarm: type !== 'pothole',
+      classifiedAt: new Date().toISOString(),
+    });
+  } catch(e) { console.warn('classify failed:', e); }
+};
+
+// ─── Load existing potholes from Firestore onto the map ─────────────────────
+window.subscribeMap = () => {
+  if (!db) return;
+  const q = query(collection(db, 'potholes'), orderBy('timestamp','desc'), limit(500));
+  onSnapshot(q, snap => {
+    snap.docChanges().forEach(change => {
+      if (change.type === 'added') {
+        const d = change.doc.data();
+        if (d.lat && d.lng) {
+          addMapMarker({ id: change.doc.id, lat: d.lat, lng: d.lng,
+            g: d.gForce, sev: d.severity, street: d.street, hits: 1 });
+        }
+      }
+    });
+  });
+};
+</script>
+
+<!-- ═══════════════════════════════════════════════════════
+     GOOGLE MAPS LOADER
+═══════════════════════════════════════════════════════ -->
+<script>
+(function() {
+  if (CONFIG.GOOGLE_MAPS_KEY.startsWith('YOUR_')) return; // skip if not configured
+  const s = document.createElement('script');
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${CONFIG.GOOGLE_MAPS_KEY}&callback=initMap&loading=async`;
+  s.async = true;
+  document.head.appendChild(s);
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════
+     MAIN APP LOGIC
+═══════════════════════════════════════════════════════ -->
+<script>
+// ── Session ID for grouping hits ─────────────────────────────────────────────
+window._sessionId = 'sess_' + Date.now().toString(36);
+window._speed = 0;
+
+// ── State ────────────────────────────────────────────────────────────────────
+let map = null;
+let detecting = false;
+let voiceOn   = false;
+let sessionHits = [];
+let selectedDamage = null;
+let motionListener = null;
+let gpsWatchId = null;
+let simLoop = null;
+let lastHitTime = 0;
+let baseline = null;
+let bSamples = [];
+let markers = new Map();           // id → { marker, circle, pothole }
+let alerted = new Set();
+let deferredInstall = null;
+let userMarker = null;
+let userAccCircle = null;
+let mapType = 'roadmap';
+
+// Seed potholes for demo (shown before any real data arrives)
+const SEEDS = [
+  { id:'s1', lat:53.5461, lng:-113.4938, g:3.2, sev:'HIGH',     street:'Jasper Ave & 97 St',      hits:47 },
+  { id:'s2', lat:53.5355, lng:-113.5084, g:4.8, sev:'CRITICAL', street:'Whyte Ave & 109 St',      hits:112 },
+  { id:'s3', lat:53.5587, lng:-113.5159, g:1.2, sev:'LOW',      street:'118 Ave & 95 St',         hits:8 },
+  { id:'s4', lat:53.5232, lng:-113.4750, g:2.7, sev:'MEDIUM',   street:'Mill Creek Rd & 76 Ave',  hits:31 },
+  { id:'s5', lat:53.5501, lng:-113.4638, g:5.1, sev:'CRITICAL', street:'Connors Rd & 98A Ave',    hits:89 },
+  { id:'s6', lat:53.5420, lng:-113.4260, g:3.6, sev:'HIGH',     street:'98 Ave & 50 St',          hits:63 },
+];
+
+const SEV_COLORS = {
+  LOW:'#22e09a', MEDIUM:'#f5a623', HIGH:'#ff6b35', CRITICAL:'#ff1a3c'
+};
+
+function getSev(g) {
+  if (g < 1.5) return 'LOW';
+  if (g < 2.5) return 'MEDIUM';
+  if (g < 4.0) return 'HIGH';
+  return 'CRITICAL';
+}
+
+// ── Google Maps init (called by Maps callback) ───────────────────────────────
+window.initMap = function() {
+  const center = { lat:53.5461, lng:-113.4938 };
+
+  // Dark map style — clean, readable at night
+  const darkStyle = [
+    { elementType:'geometry',          stylers:[{color:'#0c1020'}] },
+    { elementType:'labels.text.fill',  stylers:[{color:'#8899b4'}] },
+    { elementType:'labels.text.stroke',stylers:[{color:'#060810'}] },
+    { featureType:'road',              elementType:'geometry',      stylers:[{color:'#1a2a42'}] },
+    { featureType:'road.highway',      elementType:'geometry',      stylers:[{color:'#1e3055'}] },
+    { featureType:'road.highway',      elementType:'geometry.stroke',stylers:[{color:'#3b7eff22'}] },
+    { featureType:'road',              elementType:'labels.text.fill',stylers:[{color:'#5a7aaa'}] },
+    { featureType:'water',             elementType:'geometry',      stylers:[{color:'#060e20'}] },
+    { featureType:'poi',               elementType:'geometry',      stylers:[{color:'#0e1828'}] },
+    { featureType:'poi',               elementType:'labels',        stylers:[{visibility:'off'}] },
+    { featureType:'transit',           elementType:'labels',        stylers:[{visibility:'off'}] },
+    { featureType:'administrative',    elementType:'geometry',      stylers:[{color:'#1a2535'}] },
+    { featureType:'administrative',    elementType:'labels.text.fill',stylers:[{color:'#6a7f9a'}] },
+    { featureType:'landscape',         elementType:'geometry',      stylers:[{color:'#0e1520'}] },
+  ];
+
+  map = new google.maps.Map(document.getElementById('gmap'), {
+    center,
+    zoom: 15,
+    mapTypeId: 'roadmap',
+    styles: darkStyle,
+    disableDefaultUI: true,
+    gestureHandling: 'greedy',
+    clickableIcons: false,
+    backgroundColor: '#060810',
+  });
+
+  // Load seed data on map
+  SEEDS.forEach(p => addMapMarker(p));
+
+  // Subscribe to Firestore data
+  if (window.subscribeMap) window.subscribeMap();
+};
+
+// ── Map type toggle ──────────────────────────────────────────────────────────
+window.setMapType = function(type, btn) {
+  if (!map) return;
+  mapType = type;
+  map.setMapTypeId(type);
+  document.querySelectorAll('.ms-btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+};
+
+// ── Add / update marker on map ───────────────────────────────────────────────
+function addMapMarker(p) {
+  if (!map) return;
+  const col = SEV_COLORS[p.sev] || '#22e09a';
+
+  // Check if we already have a marker very close to this one
+  for (const [id, entry] of markers) {
+    if (haversineM(p.lat, p.lng, entry.pothole.lat, entry.pothole.lng)
+        < CONFIG.MERGE_RADIUS_M) {
+      // Just update the existing one
+      entry.pothole.hits = (entry.pothole.hits || 1) + 1;
+      entry.pothole.g = Math.max(entry.pothole.g, p.g);
+      entry.pothole.sev = getSev(entry.pothole.g);
+      const newCol = SEV_COLORS[entry.pothole.sev];
+      entry.circle.setOptions({ fillColor: newCol, strokeColor: newCol });
+      return;
+    }
+  }
+
+  // Glow circle
+  const circle = new google.maps.Circle({
+    map,
+    center: { lat: p.lat, lng: p.lng },
+    radius: 18 + Math.min((p.hits || 1) * 0.3, 20),
+    fillColor: col,
+    fillOpacity: 0.18,
+    strokeColor: col,
+    strokeOpacity: 0.5,
+    strokeWeight: 1.5,
+    clickable: false,
+  });
+
+  // Dot marker
+  const marker = new google.maps.Marker({
+    map,
+    position: { lat: p.lat, lng: p.lng },
+    icon: {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: p.sev === 'CRITICAL' ? 9 : p.sev === 'HIGH' ? 7 : 5.5,
+      fillColor: col,
+      fillOpacity: 1,
+      strokeColor: '#060810',
+      strokeWeight: 2,
+    },
+    title: `${p.sev} · ${p.g}G · ${p.street}`,
+    optimized: true,
+  });
+
+  // Info window on tap
+  const iw = new google.maps.InfoWindow({
+    content: `<div style="background:#0c1020;color:#e8edf5;padding:10px 12px;
+      border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;min-width:160px;">
+      <div style="font-family:'Syne',sans-serif;font-size:14px;font-weight:800;
+        color:${col};margin-bottom:6px;">${p.sev} IMPACT</div>
+      <div>📍 ${p.street}</div>
+      <div style="margin-top:4px;">⚡ Peak: <strong>${p.g}G</strong></div>
+      <div>🚗 Hits: <strong>${p.hits || 1}</strong></div>
+    </div>`,
+    pixelOffset: new google.maps.Size(0, -10),
+  });
+  marker.addListener('click', () => iw.open(map, marker));
+
+  markers.set(p.id || ('m' + Date.now()), { marker, circle, pothole: p });
+}
+
+// ── User position marker ─────────────────────────────────────────────────────
+function setUserPosition(lat, lng, accuracy) {
+  if (!map) return;
+  const pos = { lat, lng };
+  if (!userMarker) {
+    userMarker = new google.maps.Marker({
+      map, position: pos,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 9,
+        fillColor: '#3b7eff',
+        fillOpacity: 1,
+        strokeColor: '#93c5fd',
+        strokeWeight: 2.5,
+      },
+      zIndex: 100,
+    });
+    userAccCircle = new google.maps.Circle({
+      map, center: pos,
+      radius: accuracy || 20,
+      fillColor: '#3b7eff',
+      fillOpacity: 0.08,
+      strokeColor: '#3b7eff',
+      strokeOpacity: 0.25,
+      strokeWeight: 1,
+      clickable: false,
+    });
+  } else {
+    userMarker.setPosition(pos);
+    userAccCircle.setCenter(pos);
+    if (accuracy) userAccCircle.setRadius(accuracy);
+  }
+  // Pan map to follow user while detecting
+  if (detecting) map.panTo(pos);
+}
+
+// ── GPS ──────────────────────────────────────────────────────────────────────
+function startGPS() {
+  if (!navigator.geolocation) { startSimGPS(); return; }
+  gpsWatchId = navigator.geolocation.watchPosition(
+    pos => {
+      const { latitude: lat, longitude: lng, accuracy, speed } = pos.coords;
+      window._lastPos = { lat, lng };
+      window._speed = speed ? Math.round(speed * 3.6) : window._speed;
+      document.getElementById('spd').textContent = window._speed || 0;
+      setUserPosition(lat, lng, accuracy);
+      checkProximity(lat, lng);
+    },
+    () => startSimGPS(),
+    { enableHighAccuracy:true, maximumAge:2000, timeout:8000 }
+  );
+}
+
+function stopGPS() {
+  if (gpsWatchId != null) navigator.geolocation.clearWatch(gpsWatchId);
+  gpsWatchId = null;
+  if (simLoop) { clearInterval(simLoop); simLoop = null; }
+}
+
+function startSimGPS() {
+  toast('GPS unavailable — simulating position');
+  let lat = 53.5461, lng = -113.4750, dir = 45, spd = 40;
+  simLoop = setInterval(() => {
+    const step = spd / 3600 * 0.6 * 0.003;
+    dir += (Math.random() - 0.5) * 12;
+    lat += step * Math.cos(dir * Math.PI/180);
+    lng += step * Math.sin(dir * Math.PI/180) * 1.3;
+    lat = Math.max(53.515, Math.min(53.58, lat));
+    lng = Math.max(-113.56, Math.min(-113.42, lng));
+    spd = Math.max(20, Math.min(70, spd + (Math.random()-0.5)*4));
+    window._lastPos = { lat, lng };
+    window._speed = Math.round(spd);
+    document.getElementById('spd').textContent = window._speed;
+    setUserPosition(lat, lng, 15);
+    checkProximity(lat, lng);
+  }, 900);
+}
+
+// ── Proximity check ──────────────────────────────────────────────────────────
+function checkProximity(lat, lng) {
+  if (!detecting) return;
+  let nearest = null, nd = Infinity;
+  for (const [, entry] of markers) {
+    const p = entry.pothole;
+    const d = haversineM(lat, lng, p.lat, p.lng);
+    if (d < nd) { nd = d; nearest = p; }
+  }
+  if (!nearest) return;
+
+  const key300 = nearest.id + ':300';
+  const key80  = nearest.id + ':80';
+  if (nd < CONFIG.WARN_DISTANCE_M && !alerted.has(key300)) {
+    alerted.add(key300);
+    fireProximityAlert(nearest, Math.round(nd), false);
+  }
+  if (nd < CONFIG.URGENT_DISTANCE_M && !alerted.has(key80)) {
+    alerted.add(key80);
+    fireProximityAlert(nearest, Math.round(nd), true);
+  }
+  // Clear when far away
+  for (const [, entry] of markers) {
+    const p = entry.pothole;
+    if (haversineM(lat, lng, p.lat, p.lng) > 600) {
+      alerted.delete(p.id + ':300');
+      alerted.delete(p.id + ':80');
+    }
+  }
+
+  // Floating ahead banner
+  if (nd < 250) showAhead(nearest, Math.round(nd));
+  else hideAhead();
+}
+
+function fireProximityAlert(p, dist, urgent) {
+  const col = SEV_COLORS[p.sev];
+  const el = document.getElementById('alert');
+  el.style.borderColor = col;
+  el.style.background = col + '18';
+  document.getElementById('alert-ico').textContent = urgent ? '🚨' : '⚠️';
+  document.getElementById('alert-title').style.color = col;
+  document.getElementById('alert-title').textContent =
+    urgent ? `${p.sev} POTHOLE — BRACE` : `${p.sev} in ${dist}m`;
+  document.getElementById('alert-sub').textContent = p.street;
+  el.classList.add('on');
+  setTimeout(() => el.classList.remove('on'), 5000);
+
+  if (navigator.vibrate)
+    navigator.vibrate(urgent ? [80,40,120,40,200] : [50,30,80]);
+  if (voiceOn)
+    speak(urgent
+      ? `Caution! ${p.sev} pothole!`
+      : `${p.sev} pothole in ${dist} metres on ${p.street}`);
+}
+
+function showAhead(p, dist) {
+  const col = SEV_COLORS[p.sev];
+  const el = document.getElementById('ahead');
+  el.style.background = col + 'ee';
+  el.style.boxShadow = `0 4px 20px ${col}44`;
+  document.getElementById('ahead-title').textContent =
+    `${p.sev} POTHOLE — ${dist}m`;
+  document.getElementById('ahead-sub').textContent = p.street;
+  el.classList.add('show');
+}
+function hideAhead() { document.getElementById('ahead').classList.remove('show'); }
+
+// ── DeviceMotion / Shock detection ──────────────────────────────────────────
+async function startMotion() {
+  if (typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function') {
+    try {
+      const r = await DeviceMotionEvent.requestPermission();
+      if (r !== 'granted') { startMotionSim(); return; }
+    } catch { startMotionSim(); return; }
+  }
+  if (typeof DeviceMotionEvent === 'undefined') { startMotionSim(); return; }
+
+  baseline = null; bSamples = [];
+  motionListener = e => {
+    const acc = e.accelerationIncludingGravity || e.acceleration;
+    if (!acc || acc.x == null) return;
+    if (!baseline) {
+      bSamples.push([acc.x, acc.y, acc.z]);
+      if (bSamples.length >= 25) {
+        baseline = bSamples.reduce(
+          (s,v) => [s[0]+v[0]/25, s[1]+v[1]/25, s[2]+v[2]/25], [0,0,0]);
+      }
+      return;
+    }
+    const dx=acc.x-baseline[0], dy=acc.y-baseline[1], dz=acc.z-baseline[2];
+    const g = Math.sqrt(dx*dx+dy*dy+dz*dz)/9.81;
+    updateG(g);
+    const now = Date.now();
+    if (g > CONFIG.HIT_THRESHOLD_G && now-lastHitTime > CONFIG.HIT_DEBOUNCE_SEC*1000) {
+      lastHitTime = now;
+      recordHit(g);
+    }
+  };
+  window.addEventListener('devicemotion', motionListener);
+  toast('Motion sensor active');
+}
+
+function startMotionSim() {
+  toast('Simulating sensor — drive around to test!');
+  let tick = 0;
+  const loop = () => {
+    if (!detecting) return;
+    tick++;
+    const base = 0.05 + Math.random()*0.2;
+    updateG(base);
+    if (Math.random() < 0.028) {
+      const g = 1.3 + Math.random()*4.3;
+      recordHit(g);
+    }
+    window._speed = Math.max(15,Math.min(75,
+      (window._speed||40)+(Math.random()-.5)*4));
+    document.getElementById('spd').textContent = window._speed;
+    setTimeout(loop, 320);
+  };
+  loop();
+}
+
+function stopMotion() {
+  if (motionListener) {
+    window.removeEventListener('devicemotion', motionListener);
+    motionListener = null;
+  }
+  baseline = null; bSamples = [];
+}
+
+// ── Record a hit ──────────────────────────────────────────────────────────────
+async function recordHit(g) {
+  const sev = getSev(g);
+  const col = SEV_COLORS[sev];
+  const pos = window._lastPos ||
+    { lat: 53.5461+(Math.random()-.5)*.01, lng:-113.4750+(Math.random()-.5)*.015 };
+  const street = await reverseGeocode(pos.lat, pos.lng);
+
+  const hit = {
+    id:     'h' + Date.now(),
+    g:      parseFloat(g.toFixed(2)),
+    sev, col,
+    lat:    pos.lat,
+    lng:    pos.lng,
+    street,
+    time:   new Date().toLocaleTimeString(),
+  };
+
+  sessionHits.unshift(hit);
+  document.getElementById('hitcount').textContent = sessionHits.length;
+
+  // Update report drawer state
+  document.getElementById('rep-g').textContent =
+    `${hit.g}G · ${hit.sev}`;
+  document.getElementById('rep-g').style.color = col;
+  document.getElementById('rep-loc').textContent =
+    `${pos.lat.toFixed(5)}, ${pos.lng.toFixed(5)} · ${street}`;
+
+  // Add to map
+  addMapMarker(hit);
+
+  // Save to Firestore
+  if (window.saveHit) window.saveHit(hit);
+
+  // Show false-alarm chip for 8 seconds so driver can correct it
+  showFalseAlarmChip(hit.id);
+
+  // Visual flash
+  const fl = document.getElementById('flash');
+  fl.style.background = col + '1a';
+  fl.style.display = 'block';
+  setTimeout(() => fl.style.display = 'none', 380);
+
+  // Status pill
+  setPill('hit', sev + ' HIT');
+  setTimeout(() => { if(detecting) setPill('live','DETECTING'); }, 2200);
+
+  // Haptic
+  if (navigator.vibrate) {
+    const ms={LOW:40,MEDIUM:80,HIGH:130,CRITICAL:220}[sev];
+    navigator.vibrate(ms);
+  }
+
+  // Voice for HIGH+
+  if (voiceOn && (sev==='HIGH'||sev==='CRITICAL'))
+    speak(`${sev} impact, ${g.toFixed(1)} G`);
+}
+
+// ── Reverse geocode (uses Google Maps Geocoder) ──────────────────────────────
+const geocoder = window.google ? new google.maps.Geocoder() : null;
+async function reverseGeocode(lat, lng) {
+  if (!window.google || !geocoder) return 'Current location';
+  return new Promise(res => {
+    geocoder.geocode({ location:{lat,lng} }, (results, status) => {
+      if (status === 'OK' && results[0]) {
+        // Return the route-level component (street name)
+        const route = results[0].address_components
+          .find(c => c.types.includes('route'));
+        res(route ? route.long_name : results[0].formatted_address.split(',')[0]);
+      } else {
+        res('Current location');
+      }
+    });
+  });
+}
+
+// ── G-Force display ──────────────────────────────────────────────────────────
+function updateG(g) {
+  const sev = getSev(g);
+  const col = g > CONFIG.HIT_THRESHOLD_G ? SEV_COLORS[sev] : 'var(--muted)';
+  const pct = Math.min(g/6*100, 100);
+  document.getElementById('gnum').style.color = col;
+  document.getElementById('gnum').innerHTML =
+    g.toFixed(1) + '<sub>G</sub>';
+  document.getElementById('gfill').style.width = pct + '%';
+  document.getElementById('gfill').style.background =
+    g > CONFIG.HIT_THRESHOLD_G ? SEV_COLORS[sev] : 'var(--green)';
+  document.getElementById('gsev').textContent =
+    g > CONFIG.HIT_THRESHOLD_G ? sev + ' IMPACT' : 'SMOOTH ROAD';
+  document.getElementById('gsev').style.color =
+    g > CONFIG.HIT_THRESHOLD_G ? SEV_COLORS[sev] : 'var(--muted)';
+}
+
+// ── Detection toggle ─────────────────────────────────────────────────────────
+window.toggleDetect = async function() {
+  detecting = !detecting;
+  const btn = document.getElementById('det-btn');
+  if (detecting) {
+    btn.textContent = '◼  STOP DETECTION';
+    btn.classList.replace('off','on');
+    setPill('live','DETECTING');
+    alerted.clear();
+    window._speed = 0;
+    initVoiceInput();   // set up SpeechRecognition + trigger mic permission early
+    await startMotion();
+    startGPS();
+    if (voiceOn) speak('PaveWatch started');
+    toast('Detection started');
+  } else {
+    btn.textContent = '▶  START DETECTION';
+    btn.classList.replace('on','off');
+    setPill('','READY');
+    stopMotion();
+    stopGPS();
+    updateG(0);
+    document.getElementById('spd').textContent = '0';
+    hideAhead();
+    toast('Detection stopped · ' + sessionHits.length + ' hits recorded');
+  }
+};
+
+// ── Voice ────────────────────────────────────────────────────────────────────
+let speechQ = [], speaking = false;
+function speak(txt) {
+  if (!('speechSynthesis' in window)) return;
+  speechQ.push(txt);
+  if (!speaking) flush();
+}
+function flush() {
+  if (!speechQ.length) { speaking=false; return; }
+  speaking = true;
+  const u = new SpeechSynthesisUtterance(speechQ.shift());
+  u.rate=1.05; u.pitch=1; u.volume=1;
+  const v = speechSynthesis.getVoices()
+    .find(v=>v.lang.startsWith('en')&&v.localService)||speechSynthesis.getVoices()[0];
+  if (v) u.voice = v;
+  u.onend = flush;
+  speechSynthesis.speak(u);
+}
+
+window.toggleVoice = function() {
+  voiceOn = !voiceOn;
+  const btn = document.getElementById('voice-btn');
+  btn.textContent = voiceOn ? '🔊' : '🔇';
+  btn.classList.toggle('on', voiceOn);
+  if (voiceOn) { speak('Voice alerts on'); toast('Voice ON'); }
+  else toast('Voice OFF');
+};
+
+// ── Log drawer ───────────────────────────────────────────────────────────────
+window.openLog = function() {
+  const body = document.getElementById('log-body');
+  document.getElementById('log-count').textContent = sessionHits.length + ' hits';
+  if (!sessionHits.length) {
+    body.innerHTML = `<div class="lempty">No impacts yet this session.<br/>
+      Tap Start Detection and drive.</div>`;
+  } else {
+    body.innerHTML = sessionHits.map(h => `
+      <div class="log-item">
+        <div class="lsev" style="background:${h.col};
+          box-shadow:0 0 6px ${h.col}66;"></div>
+        <div class="lg" style="color:${h.col};">${h.g}G</div>
+        <div class="linfo">
+          <div class="lstreet">${h.sev} · ${h.street}</div>
+          <div class="lmeta">${h.time} · ${h.lat.toFixed(5)}, ${h.lng.toFixed(5)}</div>
+        </div>
+      </div>`).join('');
+  }
+  document.getElementById('log-drawer').classList.add('open');
+};
+window.closeLog = () =>
+  document.getElementById('log-drawer').classList.remove('open');
+
+// ── Report drawer ─────────────────────────────────────────────────────────────
+const COSTS = {tire:350,suspension:650,body:800,alignment:200};
+window.openReport = function() {
+  document.getElementById('rep-drawer').classList.add('open');
+};
+window.closeReport = () =>
+  document.getElementById('rep-drawer').classList.remove('open');
+
+window.pickDamage = function(type, el) {
+  document.querySelectorAll('.inc').forEach(e=>e.classList.remove('sel'));
+  el.classList.add('sel');
+  selectedDamage = type;
+  const c = COSTS[type];
+  document.getElementById('cost-slider').value = c;
+  document.getElementById('cost-disp').textContent = '$'+c.toLocaleString();
+  document.getElementById('sub-btn').disabled = false;
+};
+
+window.submitClaim = async function() {
+  if (!selectedDamage) return;
+  const hit = sessionHits[0];
+  const cost = parseInt(document.getElementById('cost-slider').value);
+  const claim = {
+    damageType:    selectedDamage,
+    estimatedCost: cost,
+    gForce:        hit?.g ?? null,
+    lat:           hit?.lat ?? window._lastPos?.lat ?? null,
+    lng:           hit?.lng ?? window._lastPos?.lng ?? null,
+    street:        hit?.street ?? 'Unknown',
+    severity:      hit?.sev ?? null,
+  };
+  const id = await window.saveClaim?.(claim);
+  const ref = id ? 'PWC-' + id.slice(-6).toUpperCase() : 'PWC-' + Date.now().toString(36).toUpperCase();
+  window.closeReport();
+  toast('Claim ' + ref + ' submitted ✓');
+};
+
+// ── False alarm chip ─────────────────────────────────────────────────────────
+let chipTimer = null;
+let chipCountdown = null;
+let pendingHitId = null;   // Firestore doc id of the most recent hit
+
+const CLASSIFY_LABELS = {
+  pothole:   '🕳️ Pothole confirmed',
+  drain:     '🔩 Marked as drain cover',
+  bump:      '〰️ Marked as speed bump',
+  railway:   '🛤️ Marked as railway crossing',
+};
+
+// ── Voice Input (SpeechRecognition) ─────────────────────────────────────────
+// Words the driver can say, mapped to classification types.
+// Kept broad so regional accents / casual speech still matches.
+const VOICE_COMMANDS = {
+  pothole:  ['pothole', 'hole', 'pot hole', 'yes', 'yep', 'confirm', 'correct', 'right'],
+  drain:    ['drain', 'drain cover', 'grate', 'grill', 'manhole', 'sewer', 'cover', 'not a pothole', 'false'],
+  bump:     ['bump', 'speed bump', 'hump', 'sleeping policeman', 'ridge'],
+  railway:  ['railway', 'rail', 'train', 'tracks', 'crossing'],
+};
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let voiceInputActive = false;
+
+function initVoiceInput() {
+  if (!SR) return; // browser doesn't support it — chip buttons still work
+  recognition = new SR();
+  recognition.lang = 'en-CA';   // Canadian English
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 5; // check multiple interpretations
+
+  recognition.onresult = (e) => {
+    // Collect all alternatives into one list of lowercase strings
+    const heard = Array.from(e.results[0])
+      .map(alt => alt.transcript.toLowerCase().trim());
+
+    let matched = null;
+    // Check each heard alternative against every command list
+    outer: for (const phrase of heard) {
+      for (const [type, keywords] of Object.entries(VOICE_COMMANDS)) {
+        if (keywords.some(kw => phrase.includes(kw))) {
+          matched = type;
+          break outer;
+        }
+      }
+    }
+
+    stopListening();
+    if (matched) {
+      classifyHit(matched);
+    } else {
+      // Heard something but didn't understand — keep chip visible,
+      // tell driver to tap instead
+      speak("Sorry, didn't catch that — please tap");
+      toast('Tap to classify ↑');
+    }
+  };
+
+  recognition.onerror = (e) => {
+    stopListening();
+    // nomatch and no-speech are normal — just let chip stay visible
+    if (e.error !== 'no-speech' && e.error !== 'nomatch') {
+      toast('Mic error: ' + e.error);
+    }
+  };
+
+  recognition.onend = () => {
+    // If still in active window and recognition stopped on its own,
+    // hide the mic indicator but leave chip visible for tap
+    stopListening(/* keepChip */ true);
+  };
+}
+
+function startListening() {
+  if (!recognition || voiceInputActive) return;
+  try {
+    recognition.start();
+    voiceInputActive = true;
+    document.getElementById('chip-mic').classList.add('on');
+    document.getElementById('chip-timer').style.display = 'none';
+  } catch(e) {
+    // recognition.start() throws if already running — safe to ignore
+  }
+}
+
+function stopListening(keepChip = false) {
+  if (!recognition) return;
+  voiceInputActive = false;
+  try { recognition.stop(); } catch(_) {}
+  document.getElementById('chip-mic').classList.remove('on');
+  document.getElementById('chip-timer').style.display = '';
+  if (!keepChip) return;
+  // Re-show timer for remaining tap window
+  // (countdown interval is still running — just unhide the number)
+}
+
+// ── Show chip + start listening ───────────────────────────────────────────────
+function showFalseAlarmChip(hitId) {
+  pendingHitId = hitId;
+  const chip   = document.getElementById('false-alarm-chip');
+  const timerEl = document.getElementById('chip-timer');
+  let secs = 8;
+  timerEl.textContent = secs;
+  timerEl.style.display = '';
+  chip.classList.add('show');
+
+  // Speak prompt then open mic — wait for TTS to finish first
+  // so the mic doesn't capture PaveWatch's own voice
+  const prompt = 'Pothole, drain cover, or speed bump?';
+  if (voiceOn) {
+    // Delay mic open until speech ends (~1.8s for this phrase at 1.05 rate)
+    speak(prompt);
+    setTimeout(startListening, 1900);
+  } else {
+    // Voice output is off — open mic silently so driver can still speak
+    startListening();
+  }
+
+  // Countdown tick (runs regardless of mic state)
+  chipCountdown = setInterval(() => {
+    secs--;
+    timerEl.textContent = secs;
+    if (secs <= 0) dismissChip();
+  }, 1000);
+
+  // Hard timeout — auto-dismiss = pothole (no response)
+  chipTimer = setTimeout(dismissChip, 8000);
+}
+
+function dismissChip() {
+  clearTimeout(chipTimer);
+  clearInterval(chipCountdown);
+  chipTimer = null; chipCountdown = null;
+  stopListening();
+  document.getElementById('false-alarm-chip').classList.remove('show');
+}
+
+// Called when driver taps one of the chip options
+window.classifyHit = function(type) {
+  dismissChip();
+
+  if (type === 'pothole') {
+    // Already stored correctly — just confirm
+    toast(CLASSIFY_LABELS[type]);
+    return;
+  }
+
+  // It's a false alarm — update Firestore + local map marker
+  toast(CLASSIFY_LABELS[type] || '✓ Noted');
+
+  // Update the most recent session hit label
+  if (sessionHits[0]) {
+    sessionHits[0].type = type;
+    sessionHits[0].falseAlarm = true;
+  }
+
+  // Remove the marker from the map (it's not a pothole)
+  if (pendingHitId && markers.has(pendingHitId)) {
+    const entry = markers.get(pendingHitId);
+    entry.marker.setMap(null);
+    entry.circle.setMap(null);
+    markers.delete(pendingHitId);
+  }
+
+  // Write the classification back to Firestore
+  if (window.classifyFirestore) {
+    window.classifyFirestore(pendingHitId, type);
+  }
+
+  pendingHitId = null;
+};
+
+// ── Pill helper ──────────────────────────────────────────────────────────────
+function setPill(state, txt) {
+  const p = document.getElementById('pill');
+  p.classList.remove('live','hit');
+  if (state) p.classList.add(state);
+  document.getElementById('pill-txt').textContent = txt;
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────────
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('on'), 2800);
+}
+
+// ── Haversine ────────────────────────────────────────────────────────────────
+function haversineM(la1,ln1,la2,ln2) {
+  const R=6371000, dLa=(la2-la1)*Math.PI/180, dLn=(ln2-ln1)*Math.PI/180;
+  const a=Math.sin(dLa/2)**2+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLn/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// ── PWA install ──────────────────────────────────────────────────────────────
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault(); deferredInstall = e;
+  document.getElementById('install').classList.add('on');
+});
+window.doInstall = async function() {
+  if (!deferredInstall) return;
+  deferredInstall.prompt();
+  const { outcome } = await deferredInstall.userChoice;
+  if (outcome==='accepted') {
+    document.getElementById('install').classList.remove('on');
+    toast('PaveWatch installed!');
+  }
+  deferredInstall = null;
+};
+window.addEventListener('appinstalled', () => {
+  document.getElementById('install').classList.remove('on');
+});
+
+// iOS "Add to Home Screen" tip
+setTimeout(() => {
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !navigator.standalone)
+    toast('Tip: Share → Add to Home Screen to install');
+}, 4000);
+
+// Speech voices preload
+if ('speechSynthesis' in window) speechSynthesis.getVoices();
+
+// ── Setup screen logic ────────────────────────────────────────────────────────
+window.dismissSetup = function() {
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  // If Maps key was already configured, Maps will have loaded already
+  if (CONFIG.GOOGLE_MAPS_KEY.startsWith('YOUR_')) {
+    // Show a demo mode notice
+    toast('Demo mode — add API keys to enable live map');
+    // Still show the app — useful for testing UI
+  }
+};
+
+// Auto-dismiss setup if keys are configured
+if (!CONFIG.GOOGLE_MAPS_KEY.startsWith('YOUR_') &&
+    !CONFIG.FIREBASE.apiKey.startsWith('YOUR_')) {
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+}
+</script>
+
+</body>
+</html>
