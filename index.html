@@ -25,16 +25,16 @@
 <script>
   const CONFIG = {
     // ── Google Maps ──────────────────────────────
-    GOOGLE_MAPS_KEY: "AIzaSyClbh-srJuHXtxt2ZF7dDt7p3ttUicLJlg",
+    GOOGLE_MAPS_KEY: "YOUR_GOOGLE_MAPS_API_KEY",
 
     // ── Firebase ─────────────────────────────────
     FIREBASE: {
-     	apiKey: "AIzaSyAm8pU3rVZ_2yIk11172dQ1x8Hp0QNjefI",
-  	authDomain: "pavewatch-8c79c.firebaseapp.com",
-  	projectId: "pavewatch-8c79c",
-  	storageBucket: "pavewatch-8c79c.firebasestorage.app",
-  	messagingSenderId: "609145096029",
-  	appId: "1:609145096029:web:313f29ae2e1f27628b4ab4"
+      apiKey:            "YOUR_FIREBASE_API_KEY",
+      authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      projectId:         "YOUR_PROJECT_ID",
+      storageBucket:     "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID"
     },
 
     // ── Detection tuning ─────────────────────────
@@ -837,19 +837,49 @@ function setUserPosition(lat, lng, accuracy) {
 
 // ── GPS ──────────────────────────────────────────────────────────────────────
 function startGPS() {
-  if (!navigator.geolocation) { startSimGPS(); return; }
-  gpsWatchId = navigator.geolocation.watchPosition(
-    pos => {
-      const { latitude: lat, longitude: lng, accuracy, speed } = pos.coords;
-      window._lastPos = { lat, lng };
-      window._speed = speed ? Math.round(speed * 3.6) : window._speed;
-      document.getElementById('spd').textContent = window._speed || 0;
-      setUserPosition(lat, lng, accuracy);
-      checkProximity(lat, lng);
-    },
-    () => startSimGPS(),
-    { enableHighAccuracy:true, maximumAge:2000, timeout:8000 }
+  if (!navigator.geolocation) {
+    toast('GPS not supported on this device');
+    return;
+  }
+
+  // First: single getCurrentPosition to show location immediately
+  // without waiting for the watch cycle
+  navigator.geolocation.getCurrentPosition(
+    pos => applyGPSPosition(pos),
+    () => {}, // silent — watchPosition below will also try
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
   );
+
+  // Then: continuous watch for updates while driving
+  gpsWatchId = navigator.geolocation.watchPosition(
+    pos => applyGPSPosition(pos),
+    err => {
+      // Only show an error if GPS was working and then lost
+      // Don't auto-start simulation — just show the status
+      if (err.code === err.PERMISSION_DENIED) {
+        toast('GPS permission denied');
+        setPill('', 'NO GPS');
+      }
+      // TIMEOUT / POSITION_UNAVAILABLE: stay silent, keep trying
+    },
+    { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
+  );
+}
+
+function applyGPSPosition(pos) {
+  const { latitude: lat, longitude: lng, accuracy, speed } = pos.coords;
+  window._lastPos = { lat, lng };
+  // Only update speed from GPS if we're actually moving (> 2 km/h)
+  // avoids showing phantom speed indoors
+  if (speed != null && speed > 0.5) {
+    window._speed = Math.round(speed * 3.6);
+    document.getElementById('spd').textContent = window._speed;
+  } else if (speed != null) {
+    window._speed = 0;
+    document.getElementById('spd').textContent = '0';
+  }
+  setUserPosition(lat, lng, accuracy);
+  if (detecting) checkProximity(lat, lng);
 }
 
 function stopGPS() {
@@ -858,10 +888,13 @@ function stopGPS() {
   if (simLoop) { clearInterval(simLoop); simLoop = null; }
 }
 
+// Sim GPS is now ONLY called explicitly from the demo/test button
+// Never called automatically during real detection
 function startSimGPS() {
-  toast('GPS unavailable — simulating position');
+  toast('Demo mode: simulating GPS movement');
   let lat = 53.5461, lng = -113.4750, dir = 45, spd = 40;
   simLoop = setInterval(() => {
+    if (!detecting) return;
     const step = spd / 3600 * 0.6 * 0.003;
     dir += (Math.random() - 0.5) * 12;
     lat += step * Math.cos(dir * Math.PI/180);
@@ -972,7 +1005,10 @@ async function startMotion() {
     const g = Math.sqrt(dx*dx+dy*dy+dz*dz)/9.81;
     updateG(g);
     const now = Date.now();
-    if (g > CONFIG.HIT_THRESHOLD_G && now-lastHitTime > CONFIG.HIT_DEBOUNCE_SEC*1000) {
+    // Only register a hit if we're actually moving (> 5 km/h)
+    // Eliminates false alarms from picking up the phone, sitting down, etc.
+    const moving = (window._speed || 0) > 5;
+    if (moving && g > CONFIG.HIT_THRESHOLD_G && now-lastHitTime > CONFIG.HIT_DEBOUNCE_SEC*1000) {
       lastHitTime = now;
       recordHit(g);
     }
@@ -982,21 +1018,22 @@ async function startMotion() {
 }
 
 function startMotionSim() {
-  toast('Simulating sensor — drive around to test!');
-  let tick = 0;
+  toast('Real sensor active — no potholes until you drive');
+  // NOTE: This sim is only reached when DeviceMotion is genuinely unavailable.
+  // It intentionally does NOT fire fake hits — it just updates the G display
+  // with low baseline noise so the UI isn't frozen.
+  // Hits only fire if window._speed > 5, preventing chair-sitting false alarms.
   const loop = () => {
     if (!detecting) return;
-    tick++;
-    const base = 0.05 + Math.random()*0.2;
+    const base = 0.02 + Math.random() * 0.08; // very low noise — stationary phone
     updateG(base);
-    if (Math.random() < 0.028) {
-      const g = 1.3 + Math.random()*4.3;
+    // Only simulate a pothole if we appear to actually be moving
+    const moving = (window._speed || 0) > 5;
+    if (moving && Math.random() < 0.025) {
+      const g = 1.3 + Math.random() * 4.3;
       recordHit(g);
     }
-    window._speed = Math.max(15,Math.min(75,
-      (window._speed||40)+(Math.random()-.5)*4));
-    document.getElementById('spd').textContent = window._speed;
-    setTimeout(loop, 320);
+    setTimeout(loop, 400);
   };
   loop();
 }
@@ -1124,6 +1161,7 @@ window.toggleDetect = async function() {
     stopMotion();
     stopGPS();
     updateG(0);
+    window._speed = 0;
     document.getElementById('spd').textContent = '0';
     hideAhead();
     toast('Detection stopped · ' + sessionHits.length + ' hits recorded');
