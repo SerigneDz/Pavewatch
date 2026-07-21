@@ -19,14 +19,14 @@
 -->
 <script>
 const CONFIG = {
-  GOOGLE_MAPS_KEY : "AIzaSyClbh-srJuHXtxt2ZF7dDt7p3ttUicLJlg",
+  GOOGLE_MAPS_KEY : "YOUR_GOOGLE_MAPS_API_KEY",
   FIREBASE: {
-    	apiKey: "AIzaSyAm8pU3rVZ_2yIk11172dQ1x8Hp0QNjefI",
-  		authDomain: "pavewatch-8c79c.firebaseapp.com",
-  		projectId: "pavewatch-8c79c",
-  		storageBucket: "pavewatch-8c79c.firebasestorage.app",
-  		messagingSenderId: "609145096029",
-  		appId: "1:609145096029:web:313f29ae2e1f27628b4ab4"
+    apiKey           : "YOUR_FIREBASE_API_KEY",
+    authDomain       : "YOUR_PROJECT.firebaseapp.com",
+    projectId        : "YOUR_PROJECT_ID",
+    storageBucket    : "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId            : "YOUR_APP_ID",
   },
   HIT_THRESHOLD_G  : 1.3,   // minimum G to log a pothole
   HIT_DEBOUNCE_SEC : 1.2,   // seconds between hits
@@ -234,8 +234,10 @@ html,body{height:100%;overflow:hidden;background:#060810;
 
 /* ── CLASSIFICATION CHIP ─────────────────────────────── */
 #chip{
-  position:fixed;bottom:calc(var(--bot) + 16px);left:50%;
-  transform:translateX(-50%) translateY(8px);
+  position:fixed;
+  bottom:calc(var(--bot) + env(safe-area-inset-bottom, 0px) + 12px);
+  left:50%;
+  transform:translateX(-50%) translateY(10px);
   z-index:50;display:flex;align-items:center;gap:8px;
   background:rgba(10,14,26,.97);border:1px solid var(--b2);
   border-radius:30px;padding:10px 14px;
@@ -424,6 +426,16 @@ html,body{height:100%;overflow:hidden;background:#060810;
       <div id="speed-chip">
         <div id="spd-val">0</div>
         <span id="spd-unit">km/h</span>
+      </div>
+      <!-- DEV: reset button — bottom-left of map -->
+      <div id="dev-tools" style="position:absolute;bottom:14px;left:10px;z-index:5;
+        display:flex;gap:6px;">
+        <button onclick="resetMap()"
+          style="padding:7px 12px;border-radius:8px;border:1px solid rgba(255,68,85,.4);
+          background:rgba(6,8,16,.88);color:#ff4455;font-family:'DM Mono',monospace;
+          font-size:10px;cursor:pointer;backdrop-filter:blur(10px);letter-spacing:.05em;">
+          🗑 RESET MAP
+        </button>
       </div>
 
       <!-- Ahead banner floats over map -->
@@ -639,6 +651,14 @@ window._fb = {
       return ref.id;
     } catch(e){ console.error(e); return null; }
   },
+  async deleteDoc(id) {
+    if (!db || !id) return;
+    try {
+      const { deleteDoc: fbDelete } = await import(
+        "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+      await fbDelete(doc(db, 'potholes', id));
+    } catch(e){ console.warn('Delete failed:', e); }
+  },
   subscribeMap() {
     if (!db) return;
     const q = query(collection(db,'potholes'),
@@ -788,18 +808,33 @@ window.addMarker = function(p) {
     title:`${p.sev} · ${p.g}G · ${p.street}`,
     optimized:true,
   });
+  const markerId = p.id||'m'+Date.now();
   const iw = new google.maps.InfoWindow({
     content:`<div style="background:#0c1020;color:#e8edf5;padding:10px 12px;
-      border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;min-width:160px;">
+      border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;min-width:180px;">
       <div style="font-family:'Syne',sans-serif;font-size:14px;font-weight:800;
         color:${col};margin-bottom:6px;">${p.sev}</div>
       <div>📍 ${p.street}</div>
       <div style="margin-top:4px;">⚡ ${p.g}G · 🚗 ${p.hits||1} hits</div>
+      <div style="display:flex;gap:6px;margin-top:10px;">
+        <button onclick="deleteMarker('${markerId}')"
+          style="flex:1;padding:6px;border-radius:6px;border:1px solid rgba(255,68,85,.4);
+          background:rgba(255,68,85,.1);color:#ff4455;font-family:'DM Mono',monospace;
+          font-size:10px;cursor:pointer;letter-spacing:.04em;">
+          🗑 DELETE
+        </button>
+        <button onclick="keepMarker('${markerId}')"
+          style="flex:1;padding:6px;border-radius:6px;border:1px solid rgba(59,126,255,.4);
+          background:rgba(59,126,255,.08);color:#3b7eff;font-family:'DM Mono',monospace;
+          font-size:10px;cursor:pointer;letter-spacing:.04em;">
+          ✓ KEEP
+        </button>
+      </div>
     </div>`,
     pixelOffset: new google.maps.Size(0,-10),
   });
   marker.addListener('click',()=>iw.open(map,marker));
-  markers.set(p.id||'m'+Date.now(), {marker,circle,p});
+  markers.set(markerId, {marker,circle,p,iw});
 };
 
 function setUserPos(lat,lng,acc) {
@@ -1144,31 +1179,53 @@ function stopListen(keepChip=false) {
 
 // ── Classification chip ────────────────────────────────────
 const C_LABELS={
-  pothole:'🕳️ Pothole confirmed',drain:'🔩 Drain cover logged',
-  bump:'〰️ Speed bump logged',railway:'🛤️ Railway crossing logged',
+  pothole:'🕳️ Pothole confirmed', drain:'🔩 Drain cover logged',
+  bump:'〰️ Speed bump logged',    railway:'🛤️ Railway crossing logged',
 };
+
 function showChip(hitId) {
-  pendingId=hitId;
-  dismissChip(); // clear any previous chip
-  const chip=document.getElementById('chip');
-  let secs=8;
-  document.getElementById('chip-secs').textContent=secs;
-  document.getElementById('chip-secs').style.display='';
-  chip.classList.add('on');
-  // Always speak prompt — it's a safety classification, not optional
-  speak('Pothole, drain cover, or speed bump?');
-  setTimeout(startListen,1900);
-  chipCountdown=setInterval(()=>{
-    secs--;
-    document.getElementById('chip-secs').textContent=secs;
-    if(secs<=0) dismissChip();
-  },1000);
-  chipTimer=setTimeout(dismissChip,8000);
+  // 1. Hard-stop any previous chip state without touching recognition
+  //    (calling recognition.stop() then .start() immediately crashes on iOS)
+  clearTimeout(chipTimer);
+  clearInterval(chipCountdown);
+  chipTimer = chipCountdown = null;
+  document.getElementById('chip').classList.remove('on');
+
+  // 2. Small gap so iOS recognition fully settles before we restart
+  setTimeout(() => {
+    pendingId = hitId;
+    const chip = document.getElementById('chip');
+    let secs = 10;  // bumped to 10s — more comfortable while driving
+    document.getElementById('chip-secs').textContent = secs;
+    document.getElementById('chip-secs').style.display = '';
+    document.getElementById('chip-mic').classList.remove('on'); // reset mic dot
+    listeningActive = false;
+    chip.classList.add('on');
+
+    // Always speak the classification prompt
+    speak('Pothole, drain cover, or speed bump?');
+
+    // Open mic after TTS finishes (~1.8s). Extra 200ms buffer for iOS.
+    setTimeout(startListen, 2100);
+
+    chipCountdown = setInterval(() => {
+      secs--;
+      document.getElementById('chip-secs').textContent = secs;
+      if (secs <= 0) dismissChip();
+    }, 1000);
+    chipTimer = setTimeout(dismissChip, 10000);
+  }, 150); // 150ms gap — enough for recognition.stop() to fully settle on iOS
 }
+
 function dismissChip() {
-  clearTimeout(chipTimer);clearInterval(chipCountdown);
-  chipTimer=chipCountdown=null;
-  stopListen();
+  clearTimeout(chipTimer);
+  clearInterval(chipCountdown);
+  chipTimer = chipCountdown = null;
+  // Stop listening without immediately restarting — safe to call anytime
+  listeningActive = false;
+  try { recognition && recognition.stop(); } catch(_) {}
+  document.getElementById('chip-mic').classList.remove('on');
+  document.getElementById('chip-secs').style.display = '';
   document.getElementById('chip').classList.remove('on');
 }
 window.classifyHit=function(type) {
@@ -1187,7 +1244,49 @@ window.classifyHit=function(type) {
   pendingId=null;
 };
 
-// ── Session log ────────────────────────────────────────────
+// ── Delete single marker ───────────────────────────────────
+window.deleteMarker = function(id) {
+  const entry = markers.get(id);
+  if (!entry) return;
+  // Close info window first
+  entry.iw.close();
+  // Remove from map
+  entry.marker.setMap(null);
+  entry.circle.setMap(null);
+  markers.delete(id);
+  // Remove from session hits
+  sessionHits = sessionHits.filter(h => h.id !== id);
+  document.getElementById('stat-hits').textContent = sessionHits.filter(h=>!h.falseAlarm).length;
+  renderLog();
+  // Delete from Firestore if it's a real doc id (not a seed)
+  if (!id.startsWith('s') && window._fb) window._fb.deleteDoc(id);
+  toast('Marker deleted');
+};
+
+window.keepMarker = function(id) {
+  const entry = markers.get(id);
+  if (entry) entry.iw.close();
+};
+
+// ── Reset entire map ───────────────────────────────────────
+window.resetMap = function() {
+  if (!confirm('Delete ALL pothole markers from the map and Firestore?\n\nThis cannot be undone.')) return;
+  // Remove every marker and circle from map
+  for (const [id, entry] of markers) {
+    entry.iw.close();
+    entry.marker.setMap(null);
+    entry.circle.setMap(null);
+    // Delete real docs from Firestore (skip seed ids s1–s6)
+    if (!id.startsWith('s') && window._fb) window._fb.deleteDoc(id);
+  }
+  markers.clear();
+  // Clear session state
+  sessionHits = []; peakG = 0;
+  document.getElementById('stat-hits').textContent = '0';
+  document.getElementById('stat-peak').textContent = '0.0';
+  renderLog();
+  toast('Map reset — all markers cleared');
+};
 function renderLog() {
   const el=document.getElementById('log-list');
   const real=sessionHits.filter(h=>!h.falseAlarm);
